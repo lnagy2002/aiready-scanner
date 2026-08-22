@@ -73,6 +73,63 @@ def availability_detail() -> dict:
     return detail
 
 
+def service_account_email() -> str:
+    """The service account's client_email — the address the sheet must be
+    shared with. Surfaced in the admin panel so it can be verified at a glance."""
+    try:
+        return str(st.secrets["gcp_service_account"].get("client_email", "")) or "(missing)"
+    except Exception:
+        return "(unreadable)"
+
+
+def diagnose_write() -> tuple[bool, str]:
+    """Run the full write path with the real exceptions surfaced (the normal
+    path swallows them to fail soft). Builds a fresh client rather than using
+    the cached one, so a previously-cached failure doesn't hide a now-fixed
+    setup. Used by the admin 'Test data store' button."""
+    if not is_available():
+        d = availability_detail()
+        if not d.get("library"):
+            return False, "gspread/google-auth not installed — on Streamlit Cloud, redeploy so requirements.txt installs, then reboot."
+        if d.get("secrets_error"):
+            return False, f"Secrets don't parse (usually the private_key's \\n formatting): {d['secrets_error']}"
+        missing = [n for n, ok in (("SHEET_ID", d.get("sheet_id")), ("[gcp_service_account]", d.get("service_account"))) if not ok]
+        return False, f"Missing secret(s): {', '.join(missing)}."
+
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+
+        creds = Credentials.from_service_account_info(dict(st.secrets["gcp_service_account"]), scopes=_SCOPES)
+        client = gspread.authorize(creds)
+    except Exception as exc:
+        return False, f"Auth failed — check the private_key formatting in Cloud secrets (its \\n line breaks): {exc}"
+
+    try:
+        sheet = client.open_by_key(st.secrets["SHEET_ID"])
+    except Exception as exc:
+        return False, (
+            f"Couldn't open the spreadsheet — check SHEET_ID, and that the sheet is shared with "
+            f"{service_account_email()} as Editor: {exc}"
+        )
+
+    try:
+        ws = sheet.worksheet(SCANS_WORKSHEET)
+    except Exception:
+        try:
+            ws = sheet.add_worksheet(title=SCANS_WORKSHEET, rows=1000, cols=8)
+            ws.append_row(["timestamp", "url", "score", "grade"])
+        except Exception as exc:
+            return False, f"Opened the sheet but couldn't create the 'scans' tab (needs Editor access): {exc}"
+
+    try:
+        ws.append_row([_now(), "https://admin-test.example", 99, "A"], value_input_option="RAW")
+        _read_scores.clear()
+        return True, "Wrote a test row to the 'scans' tab. Delete it from the sheet when you're done."
+    except Exception as exc:
+        return False, f"Opened the sheet but the write failed (needs Editor, not Viewer): {exc}"
+
+
 @st.cache_resource(show_spinner=False)
 def _spreadsheet():
     """Authorized handle to the spreadsheet, cached for the process. Returns

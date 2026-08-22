@@ -1532,23 +1532,18 @@ def render_admin_diagnostics() -> None:
                 st.caption(f"Import error: {d['library_error']}")
             if d.get("secrets_error"):
                 st.caption(f"Secrets error (often a TOML parse problem in the key): {d['secrets_error']}")
+        if datastore.availability_detail().get("service_account"):
+            st.caption(f"Service account (share the sheet with this as Editor): {datastore.service_account_email()}")
 
         col_a, col_b = st.columns(2)
         with col_a:
             if st.button("Test data store", key="admin_test_store", use_container_width=True):
-                wrote = datastore.log_scan("https://admin-test.example", 99, "A")
+                ok, msg = datastore.diagnose_write()
                 current_typical_score.clear()
-                if wrote:
-                    st.success(
-                        "Wrote a test row to the 'scans' tab. Delete it from the sheet "
-                        f"when you're done. Typical score now reads {datastore.get_typical_score()}/100."
-                    )
+                if ok:
+                    st.success(f"{msg} Typical score now reads {datastore.get_typical_score()}/100.")
                 else:
-                    st.error(
-                        "Write failed. Check: SHEET_ID is correct, the [gcp_service_account] "
-                        "block is complete, and the sheet is shared with the service account's "
-                        "client_email as an Editor."
-                    )
+                    st.error(msg)
         with col_b:
             if st.button("Send test email", key="admin_test_email", use_container_width=True):
                 sent, msg = email_notify.send_lead_notification(
