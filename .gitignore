@@ -1,0 +1,16 @@
+# Secrets — never commit real values (the .example template is fine to commit)
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Scanner output
+ai_readiness_report.json
+*.csv
+
+# OS
+.DS_Store

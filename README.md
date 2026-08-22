@@ -33,10 +33,21 @@ Use Streamlit Community Cloud:
 2. Upload these files:
    - `app.py`
    - `ai_readiness_scanner.py`
+   - `report_pdf.py`
+   - `ai_simulation.py`
    - `requirements.txt`
 3. Go to Streamlit Community Cloud.
 4. Choose your repo, branch, and `app.py`.
 5. Click Deploy.
+
+## Optional: AI-answer simulation
+
+The "What would an AI assistant say about you?" feature calls the Anthropic
+API to show, in real words, what an assistant would tell a customer based only
+on what it can read on the page. It only appears when an Anthropic API key is
+available to the app (set `ANTHROPIC_API_KEY` — on Streamlit Community Cloud,
+add it under the app's Secrets). Without a key the app runs exactly as before,
+just without that one section.
 
 ## MVP note
 
