@@ -176,6 +176,12 @@ def _ai_discovery_flowables(discovery: dict) -> list:
     verdict_hex = "#1F6B43" if appears else HIGH_PRIORITY_HEX
     flow.append(Paragraph(f'<font color="{verdict_hex}"><b>{escape(verdict)}</b></font>', BODY_STYLE))
 
+    # Readiness-vs-visibility reconciliation (low score but appears in results).
+    reconcile = discovery.get("reconcile")
+    if reconcile:
+        flow.append(Spacer(1, 4))
+        flow.append(Paragraph(escape(reconcile), BODY_STYLE))
+
     recommended = discovery.get("recommended") or []
     if recommended:
         flow.append(Spacer(1, 4))
@@ -188,6 +194,17 @@ def _ai_discovery_flowables(discovery: dict) -> list:
         flow.append(ListFlowable(
             [ListItem(p, spaceBefore=2) for p in items], bulletType="bullet", leftIndent=14, bulletFontSize=9
         ))
+    # The verbatim model answer, so the ranking above is auditable rather than
+    # only summarized. Rendered paragraph-by-paragraph; any markdown the model
+    # emitted (**, numbered lists) shows as plain text, which is fine here.
+    answer_text = discovery.get("answer_text")
+    if answer_text:
+        flow.append(Paragraph("Full AI answer (verbatim)", H3_STYLE))
+        for para in answer_text.split("\n"):
+            para = para.strip()
+            if para:
+                flow.append(Paragraph(escape(para), BODY_STYLE))
+
     flow.append(Spacer(1, 4))
     flow.append(Paragraph(
         "A snapshot for this one query — AI answers vary by wording, location, and over time. Improving the "

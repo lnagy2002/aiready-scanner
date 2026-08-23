@@ -91,6 +91,20 @@ GBP_DOMAINS = {
 # tel: link normalization.
 PHONE_RE = re.compile(r"(\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}")
 
+# Per-page weighting for the site score. The homepage and core commercial pages
+# should count more than utility pages (search results, careers, cart/redirects,
+# legal) that legitimately carry no business/LocalBusiness schema — otherwise a
+# large multi-page site is unfairly dragged down by pages nobody expects to hold
+# business markup (see crawl()).
+HOME_PAGE_WEIGHT = 2.5
+CORE_PAGE_WEIGHT = 1.0
+UTILITY_PAGE_WEIGHT = 0.25
+UTILITY_PATH_MARKERS = (
+    "search", "career", "store-redirect", "redirect", "cart", "checkout",
+    "login", "signin", "sign-in", "account", "privacy", "terms", "sitemap",
+    "wishlist", "404",
+)
+
 
 @dataclass
 class PageResult:
@@ -191,6 +205,19 @@ def same_domain(url: str, root: str) -> bool:
 def clean_url(url: str) -> str:
     url, _frag = urldefrag(url)
     return url.rstrip("/") or url
+
+
+def page_weight(url: str) -> float:
+    """How much a page counts toward the site score. Homepage highest, then
+    core commercial pages, then utility pages (search/careers/cart/legal) that
+    shouldn't be expected to carry business schema — so they can't unfairly drag
+    down a large, otherwise-solid site."""
+    path = urlparse(url).path.lower().rstrip("/")
+    if path in ("", "/"):
+        return HOME_PAGE_WEIGHT
+    if any(marker in path for marker in UTILITY_PATH_MARKERS):
+        return UTILITY_PAGE_WEIGHT
+    return CORE_PAGE_WEIGHT
 
 
 def text_or_none(value: Any) -> str | None:
@@ -553,7 +580,13 @@ def crawl(start_url: str, max_pages: int) -> SiteReport:
                     queue.append(link)
 
     valid_pages = [p for p in pages if p.status_code and p.status_code < 400]
-    avg_page_score = int(sum(p.page_score for p in valid_pages) / max(len(valid_pages), 1))
+    # Weighted so utility pages (search/careers/redirects) barely count and the
+    # homepage + core pages dominate — a fairer headline for multi-page sites.
+    weights = [page_weight(p.url) for p in valid_pages]
+    total_weight = sum(weights) or 1.0
+    avg_page_score = int(round(
+        sum(p.page_score * w for p, w in zip(valid_pages, weights)) / total_weight
+    )) if valid_pages else 0
 
     site_bonus = 0
     homepage_indexable_hint = True

@@ -8,7 +8,6 @@ import streamlit as st
 import ai_discovery
 import ai_simulation
 import datastore
-import email_notify
 from ai_readiness_scanner import comparison_summary, crawl
 from report_pdf import build_pdf_report
 
@@ -27,6 +26,18 @@ def normalize_url_for_display(url: str) -> str:
     if not re.match(r"^https?://", url, re.I):
         url = "https://" + url
     return url
+
+
+def queue_scan_from_input() -> None:
+    """Start a scan from the URL box's on_change — this is what makes pressing
+    Enter in the field kick off the scan (Streamlit's Enter only commits the
+    value and reruns; it doesn't click the button). Sets the same flags the
+    scan button sets; the rerun that follows the callback runs the crawl."""
+    url = (st.session_state.get("website_url_input") or "").strip()
+    if url and not st.session_state.get("scanning"):
+        st.session_state["pending_url"] = url
+        st.session_state["scanning"] = True
+        st.session_state["scan_error"] = ""
 
 
 def pages_to_dataframe(report) -> pd.DataFrame:
@@ -735,12 +746,24 @@ def discovery_dict_for_pdf(report) -> dict | None:
         {"name": biz.name, "is_you": res.position == i}
         for i, biz in enumerate(res.recommended, start=1)
     ]
+    # Reconcile a low on-page score with a decent live ranking: the readiness
+    # score measures the site; the ranking often rides on off-site reviews.
+    reconcile = ""
+    if res.appears and report.site_score < 70:
+        reconcile = (
+            f"You appear in AI recommendations today — but largely on the strength of third-party review "
+            f"sites, not your own website (your AI-readiness score is {report.site_score}/100). Strengthening "
+            f"the fixes in this report is how you climb the ranking and stop depending on aggregators."
+        )
+
     return {
         "query": res.query,
         "appears": res.appears,
         "position": res.position,
         "verdict": verdict,
         "recommended": recommended,
+        "answer_text": res.answer_text,
+        "reconcile": reconcile,
     }
 
 
@@ -1226,7 +1249,19 @@ def overall_summary(report) -> list[str]:
             "The most important fix right now: "
             + plain_english_recommendation(report.top_recommendations[0])
         )
-    if report.site_score < 70:
+    # Stakes line, readiness-vs-visibility aware. If a live discovery check has
+    # run and the business already appears, the "AI overlooks you" line would be
+    # provably false — so reframe: they're being carried by off-site reviews, and
+    # a weak site is what lets competitors overtake them.
+    disc = st.session_state.get(f"ai_discovery::{report.normalized_url}")
+    appeared = bool(disc and getattr(disc, "appears", False))
+    if appeared and report.site_score < 70:
+        bullets.append(
+            "You already appear in AI recommendations — but largely on the strength of third-party review "
+            "sites, not your own website. Strengthening these fixes is how you climb the ranking and stop "
+            "depending on aggregators that can change at any time."
+        )
+    elif report.site_score < 70:
         bullets.append(
             "Until this is addressed, AI tools may overlook your business and recommend a competitor instead."
         )
@@ -1295,8 +1330,61 @@ def render_results_page(report, competitor_reports: list) -> None:
     site_label = report.normalized_url.replace("https://", "").replace("http://", "").rstrip("/")
 
     st.markdown(f'<div class="results-site">{escape(site_label)}</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="gauge-wrap">{score_gauge_svg(report.site_score, band_class)}</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="gauge-band cat-status-{band_class}">{escape(band_label)}</div>', unsafe_allow_html=True)
+
+    axis_panels_html = (
+        '<div class="axis-panel-wrap">'
+        '<div class="axis-panel-header">Two things decide whether AI sends you customers</div>'
+        '<div class="axis-panel-grid">'
+
+        '<div class="axis-panel axis-panel-free">'
+        '<div class="axis-panel-top">'
+        '<div class="axis-panel-kicker-wrap">'
+        '<span class="axis-panel-number axis-panel-number-free">1</span>'
+        '<span class="axis-panel-kicker">Included free</span>'
+        '</div>'
+        f'<span class="axis-panel-status cat-status-{band_class}">{escape(band_label)}</span>'
+        '</div>'
+        '<div class="axis-panel-main">'
+        '<div>'
+        '<h3>Website AI-Readiness</h3>'
+        '<p>How clearly AI tools can read and understand your website.</p>'
+        '</div>'
+        '</div>'
+        '<div class="axis-score-row">'
+        f'<div class="axis-score"><span class="axis-score-num cat-status-{band_class}">{report.site_score}</span><span class="axis-score-den">/100</span></div>'
+        '<div class="axis-score-divider"></div>'
+        f'<div class="axis-score-copy">{escape(grade_message(report.site_score))}</div>'
+        '</div>'
+        '</div>'
+
+        '<div class="axis-panel axis-panel-paid">'
+        '<div class="axis-panel-top">'
+        '<div class="axis-panel-kicker-wrap">'
+        '<span class="axis-panel-number axis-panel-number-paid">2</span>'
+        '<span class="axis-panel-kicker">Paid add-on</span>'
+        '</div>'
+        '<span class="axis-panel-lock">Full report</span>'
+        '</div>'
+        '<div class="axis-panel-main">'
+        '<div>'
+        '<h3>AI Visibility</h3>'
+        '<p>We check whether AI tools actually recommend your business when customers search.</p>'
+        '</div>'
+        '</div>'
+        '<ul class="axis-panel-list">'
+        '<li>See if AI recommends you or a competitor</li>'
+        '<li>Get the prompt and result snapshot</li>'
+        '</ul>'
+        '<div class="axis-panel-action">'
+        '<a class="axis-panel-button" href="#full-report">Get full report →</a>'
+        '<div class="axis-panel-note">🔒 Includes full findings, competitor insights, and step-by-step fixes.</div>'
+        '</div>'
+        '</div>'
+
+        '</div>'
+        '</div>'
+    )
+    st.markdown(axis_panels_html, unsafe_allow_html=True)
 
     # Benchmark context for the score (adaptive — see current_typical_score).
     typical = current_typical_score()
@@ -1380,6 +1468,20 @@ def render_results_page(report, competitor_reports: list) -> None:
             unsafe_allow_html=True,
         )
 
+    # ---- Mid-page CTA: jump to the full-report section ----
+    # Anchors to #full-report (target rendered just above that section below).
+    st.markdown(
+        '<div class="fix-cta">'
+        '<div class="fix-cta-icon">📄</div>'
+        '<div class="fix-cta-copy">'
+        '<strong>Want the exact fixes?</strong>'
+        '<span>Get the full PDF: your AI visibility (does AI recommend you?), page-by-page details, and ready-to-paste fixes.</span>'
+        '</div>'
+        '<a class="fix-cta-button" href="#full-report">Get the full fix plan — $10 →</a>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
     # ---- Featured competitor section ----
     competitor_html = """
 <div class="competitor-feature">
@@ -1450,7 +1552,7 @@ def render_results_page(report, competitor_reports: list) -> None:
         '<div class="full-picture-copy">'
         '<div class="full-picture-eyebrow">Full report</div>'
         '<h2>Want the full picture?</h2>'
-        '<p class="full-picture-lede">Unlock the live <strong>“does AI recommend you?”</strong> check, a prioritized fix plan, ready-to-paste schema, and page-by-page detail as a PDF.</p>'
+        '<p class="full-picture-lede">Your score above measures your website\'s <strong>AI-readiness</strong>. The full report goes further — it checks your real <strong>AI visibility</strong> (does ChatGPT actually recommend you?), plus a prioritized fix plan, ready-to-paste schema, and page-by-page detail as a PDF.</p>'
         '<div class="full-feature-grid">'
         '<div class="full-feature"><span>01</span><strong>Live AI recommendation check</strong><p>We ask ChatGPT the way a real customer would and show whether you appear.</p></div>'
         '<div class="full-feature"><span>02</span><strong>Priority fix list</strong><p>See what to fix first, in plain English, so you do not waste time.</p></div>'
@@ -1474,6 +1576,8 @@ def render_results_page(report, competitor_reports: list) -> None:
         '</div>'
         '</div>'
     )
+    # Scroll target for the mid-page "Want the exact fixes?" CTA above.
+    st.markdown('<div id="full-report"></div>', unsafe_allow_html=True)
     st.markdown(full_report_html, unsafe_allow_html=True)
 
     # Owner sees the example alongside the real download; visitors see the
@@ -1505,15 +1609,13 @@ def render_results_page(report, competitor_reports: list) -> None:
 
 def render_admin_diagnostics() -> None:
     """Owner-only setup checks, shown when the app is opened with
-    ?admin=<ADMIN_TOKEN>. Lets you confirm the Google Sheets store and Resend
-    email are wired up — with a real probe write / test send — without having
-    to run a full scan or submit the lead form first."""
+    ?admin=<ADMIN_TOKEN>. Lets you confirm the Google Sheets store is wired up
+    — with a real probe write — without having to run a full scan or submit the
+    lead form first."""
     with st.expander("⚙️ Admin diagnostics (owner only)", expanded=False):
         store_ok = datastore.is_available()
-        email_ok = email_notify.is_available()
         st.markdown(
             f"- **Data store (Google Sheets):** {'✅ configured' if store_ok else '❌ not configured'}\n"
-            f"- **Email (Resend):** {'✅ configured' if email_ok else '❌ not configured'}\n"
             f"- **Payment link (Stripe):** {'✅ set' if _secret('STRIPE_PAYMENT_LINK') else '❌ not set'}\n"
             f"- **Current typical score:** {current_typical_score()}/100"
         )
@@ -1535,30 +1637,13 @@ def render_admin_diagnostics() -> None:
         if datastore.availability_detail().get("service_account"):
             st.caption(f"Service account (share the sheet with this as Editor): {datastore.service_account_email()}")
 
-        col_a, col_b = st.columns(2)
-        with col_a:
-            if st.button("Test data store", key="admin_test_store", use_container_width=True):
-                ok, msg = datastore.diagnose_write()
-                current_typical_score.clear()
-                if ok:
-                    st.success(f"{msg} Typical score now reads {datastore.get_typical_score()}/100.")
-                else:
-                    st.error(msg)
-        with col_b:
-            if st.button("Send test email", key="admin_test_email", use_container_width=True):
-                sent, msg = email_notify.send_lead_notification(
-                    website="https://admin-test.example",
-                    score=99,
-                    grade="A",
-                    company="Admin Test Co",
-                    contact_name="Admin Test",
-                    email=email_notify.notify_recipient(),
-                    payment_link=_secret("STRIPE_PAYMENT_LINK"),
-                )
-                if sent:
-                    st.success(f"Test email sent to {email_notify.notify_recipient()}.")
-                else:
-                    st.error(msg)
+        if st.button("Test data store", key="admin_test_store", use_container_width=True):
+            ok, msg = datastore.diagnose_write()
+            current_typical_score.clear()
+            if ok:
+                st.success(f"{msg} Typical score now reads {datastore.get_typical_score()}/100.")
+            else:
+                st.error(msg)
 
 
 # ---------------- Styling ----------------
@@ -2392,15 +2477,335 @@ st.markdown("""
         word-break: break-word;
     }
 
-    .gauge-wrap { text-align: center; margin: 0.5rem 0 0.3rem 0; }
-    .gauge { display: inline-block; }
-    .gauge-num { font-size: 2.4rem; font-weight: 900; fill: var(--ink); }
-    .gauge-den { font-size: 0.8rem; fill: var(--muted); }
-    .gauge-band {
+    /* ---- Results score intro + two decision cards ---- */
+    /* ---- Strong two-panel axis section (results top) ---- */
+    .axis-panel-wrap {
+        max-width: 1120px;
+        margin: 0.35rem auto 2.25rem auto;
+    }
+
+    .axis-panel-header {
         text-align: center;
-        font-weight: 820;
+        color: var(--ink);
+        font-size: clamp(1.5rem, 2.8vw, 2.15rem);
+        line-height: 1.05;
+        letter-spacing: -0.055em;
+        margin: 0 0 1.45rem 0;
+        font-weight: 900;
+    }
+
+    .axis-panel-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 1.05rem;
+    }
+
+    .axis-panel {
+        position: relative;
+        overflow: hidden;
+        border-radius: 0.9rem;
+        border: 1px solid var(--line);
+        padding: 1.55rem 1.65rem;
+        min-height: 375px;
+        display: flex;
+        flex-direction: column;
+        box-shadow: 0 18px 52px rgba(12,12,15,0.055);
+    }
+
+    .axis-panel-free {
+        background:
+            radial-gradient(circle at bottom right, rgba(231,111,81,0.19), transparent 34%),
+            radial-gradient(circle at top left, rgba(255,255,255,0.70), transparent 30%),
+            #FFF1EA;
+        border-color: #E9B9A8;
+    }
+
+    .axis-panel-free::after {
+        content: "";
+        position: absolute;
+        right: -80px;
+        bottom: -90px;
+        width: 310px;
+        height: 310px;
+        background-image: radial-gradient(rgba(231,111,81,0.22) 1.5px, transparent 1.5px);
+        background-size: 13px 13px;
+        opacity: 0.55;
+        pointer-events: none;
+    }
+
+    .axis-panel-paid {
+        background:
+            radial-gradient(circle at top right, rgba(231,111,81,0.12), transparent 30%),
+            radial-gradient(circle at bottom left, rgba(255,255,255,0.62), transparent 34%),
+            #F5EDE3;
+        border-color: #E2D3C4;
+    }
+
+    .axis-panel-top {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 1.35rem;
+        flex-wrap: wrap;
+    }
+
+    .axis-panel-kicker-wrap {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.65rem;
+    }
+
+    .axis-panel-number {
+        width: 34px;
+        height: 34px;
+        border-radius: 999px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 920;
+        font-size: 0.92rem;
+    }
+
+    .axis-panel-number-free {
+        background: var(--accent);
+        color: #ffffff;
+        box-shadow: 0 8px 20px rgba(231,111,81,0.22);
+    }
+
+    .axis-panel-number-paid {
+        background: #6B3F00;
+        color: #ffffff;
+        box-shadow: 0 8px 20px rgba(107,63,0,0.16);
+    }
+
+    .axis-panel-kicker {
+        color: #5F5A55;
+        text-transform: uppercase;
+        letter-spacing: 0.09em;
+        font-size: 0.84rem;
+        font-weight: 920;
+    }
+
+    .axis-panel-status,
+    .axis-panel-lock {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 999px;
+        padding: 0.55rem 0.95rem;
+        font-size: 0.88rem;
+        font-weight: 900;
+        white-space: nowrap;
+    }
+
+    .axis-panel-status {
+        background: #ffffff;
+        border: 1px solid #F0C8BA;
+        color: #8A4B00;
+        box-shadow: 0 8px 18px rgba(12,12,15,0.035);
+    }
+
+    .axis-panel-lock {
+        background: var(--ink);
+        color: #ffffff;
+        box-shadow: 0 10px 24px rgba(11,11,15,0.12);
+    }
+
+    .axis-panel-main {
+        position: relative;
+        z-index: 1;
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 1rem;
+        align-items: center;
+        margin-bottom: 1.35rem;
+    }
+
+    .axis-panel-icon {
+        width: 76px;
+        height: 76px;
+        border-radius: 999px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 900;
+        font-size: 2rem;
+    }
+
+    .axis-panel-icon-free {
+        background: #FFE1D6;
+        color: var(--accent);
+        border: 1px solid #F0BBA9;
+    }
+
+    .axis-panel-icon-paid {
+        background: #F5DEC6;
+        color: #6B3F00;
+        border: 1px solid #E7C8A5;
+    }
+
+    .axis-panel h3 {
+        color: var(--ink);
+        font-size: clamp(1.45rem, 2.3vw, 1.95rem);
+        line-height: 1.05;
+        letter-spacing: -0.055em;
+        margin: 0 0 0.55rem 0;
+        font-weight: 920;
+    }
+
+    .axis-panel p {
+        color: #2F2B27;
         font-size: 1.05rem;
-        margin-bottom: 1.6rem;
+        line-height: 1.48;
+        margin: 0;
+    }
+
+    .axis-score-row {
+        position: relative;
+        z-index: 1;
+        margin-top: auto;
+        display: grid;
+        grid-template-columns: auto 1px 1fr;
+        gap: 1.25rem;
+        align-items: end;
+    }
+
+    .axis-score {
+        display: flex;
+        align-items: baseline;
+        gap: 0.34rem;
+        line-height: 1;
+    }
+
+    .axis-score-num {
+        font-size: clamp(5.1rem, 8.5vw, 7.4rem);
+        font-weight: 930;
+        letter-spacing: -0.09em;
+        color: #8A4B00;
+    }
+
+    .axis-score-den {
+        color: #4F4B46;
+        font-size: 1.65rem;
+        font-weight: 760;
+    }
+
+    .axis-score-divider {
+        width: 1px;
+        height: 84px;
+        background: #E9B9A8;
+        align-self: center;
+    }
+
+    .axis-score-copy {
+        color: #2F2B27;
+        font-size: 1.03rem;
+        line-height: 1.5;
+        max-width: 22rem;
+        padding-bottom: 0.3rem;
+    }
+
+    .axis-panel-list {
+        position: relative;
+        z-index: 1;
+        list-style: none;
+        margin: 0 0 1.35rem 0;
+        padding: 0;
+        color: #2F2B27;
+        font-size: 1.03rem;
+        line-height: 1.5;
+    }
+
+    .axis-panel-list li {
+        position: relative;
+        margin-bottom: 0.62rem;
+        padding-left: 2rem;
+    }
+
+    .axis-panel-list li::before {
+        content: "✓";
+        position: absolute;
+        left: 0;
+        top: 0.03rem;
+        width: 1.25rem;
+        height: 1.25rem;
+        border-radius: 999px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: #8A4B00;
+        color: #ffffff;
+        font-size: 0.75rem;
+        font-weight: 900;
+    }
+
+    .axis-panel-action {
+        position: relative;
+        z-index: 1;
+        margin-top: auto;
+        border-top: 1px solid #E2D3C4;
+        padding-top: 1.05rem;
+    }
+
+    .axis-panel-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        min-height: 58px;
+        padding: 0.95rem 1.25rem;
+        border-radius: 0.75rem;
+        background: var(--ink);
+        color: #ffffff !important;
+        text-decoration: none !important;
+        font-size: 1.05rem;
+        font-weight: 900;
+        letter-spacing: -0.025em;
+        box-shadow: 0 14px 26px rgba(11,11,15,0.16);
+        transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+    }
+
+    .axis-panel-button:hover {
+        transform: translateY(-1px);
+        background: var(--accent);
+        box-shadow: 0 18px 30px rgba(231,111,81,0.22);
+        color: #ffffff !important;
+    }
+
+    .axis-panel-note {
+        margin-top: 0.75rem;
+        color: #5F5A55;
+        text-align: center;
+        font-size: 0.92rem;
+        line-height: 1.4;
+    }
+
+    @media (max-width: 900px) {
+        .axis-panel-grid {
+            grid-template-columns: 1fr;
+        }
+
+        .axis-panel {
+            min-height: auto;
+            padding: 1.35rem;
+        }
+
+        .axis-panel-main {
+            grid-template-columns: 1fr;
+        }
+
+        .axis-score-row {
+            grid-template-columns: 1fr;
+            gap: 0.6rem;
+        }
+
+        .axis-score-divider {
+            width: 100%;
+            height: 1px;
+        }
     }
 
     .discovery-preview {
@@ -2661,7 +3066,7 @@ st.markdown("""
 .competitor-feature {
   background:
     radial-gradient(circle at bottom right, rgba(231,111,81,0.22), transparent 34%),
-    #0B0B0F;
+    #d0673d;
   color: #ffffff;
   border-radius: 0.5rem;
   padding: 2.6rem;
@@ -2669,7 +3074,7 @@ st.markdown("""
 }
 
 .competitor-eyebrow {
-  color: var(--accent);
+  color: #0B0B0F;
   font-size: 0.85rem;
   font-weight: 900;
   text-transform: uppercase;
@@ -2688,7 +3093,7 @@ st.markdown("""
 
 .competitor-feature p {
   max-width: 780px;
-  color: #D8D2CC;
+  color: white;
   font-size: 1.08rem;
   line-height: 1.55;
   margin: 0 0 1.5rem 0;
@@ -2702,7 +3107,7 @@ st.markdown("""
 }
 
 .competitor-micro {
-  background: rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.8);
   border: 1px solid rgba(255,255,255,0.14);
   border-radius: 0.5rem;
   padding: 1rem;
@@ -2715,8 +3120,8 @@ st.markdown("""
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: rgba(231,111,81,0.16);
-  color: var(--accent);
+  background: #d0673d;
+  color: white;
   font-weight: 900;
   font-size: 0.82rem;
   margin-bottom: 0.7rem;
@@ -2724,13 +3129,13 @@ st.markdown("""
 
 .competitor-micro strong {
   display: block;
-  color: #ffffff;
+  color: black;
   margin-bottom: 0.35rem;
 }
 
 .competitor-micro span {
   display: block;
-  color: #D8D2CC;
+  color: black;
   line-height: 1.45;
   font-size: 0.95rem;
 }
@@ -3170,6 +3575,81 @@ st.markdown("""
         font-size: 0.9rem;
     }
 
+    /* Smooth in-page scroll for the "Want the exact fixes?" anchor jump. */
+    html { scroll-behavior: smooth; }
+
+    /* ---- Mid-page full-report CTA banner ---- */
+    .fix-cta {
+        display: flex;
+        align-items: center;
+        gap: 1.1rem;
+        flex-wrap: wrap;
+        margin: 0.3rem 0 1.5rem 0;
+        padding: 1.15rem 1.35rem;
+        border-radius: 0.9rem;
+        background: #fff6f1;
+        border: 1px solid #f3c9b8;
+    }
+
+    .fix-cta-icon {
+        flex: 0 0 auto;
+        width: 52px;
+        height: 52px;
+        border-radius: 999px;
+        background: #fde7dd;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.5rem;
+    }
+
+    .fix-cta-copy {
+        flex: 1 1 300px;
+        display: flex;
+        flex-direction: column;
+        gap: 0.2rem;
+    }
+
+    .fix-cta-copy strong {
+        color: var(--ink);
+        font-size: 1.15rem;
+        font-weight: 850;
+        letter-spacing: -0.02em;
+    }
+
+    .fix-cta-copy span {
+        color: #5f5a55;
+        font-size: 0.98rem;
+        line-height: 1.45;
+    }
+
+    .fix-cta-button {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--ink);
+        color: #ffffff !important;
+        font-weight: 820;
+        font-size: 1rem;
+        padding: 0.95rem 1.4rem;
+        border-radius: 0.6rem;
+        text-decoration: none !important;
+        white-space: nowrap;
+        transition: background 0.12s ease, transform 0.12s ease;
+    }
+
+    .fix-cta-button:hover {
+        background: var(--accent);
+        color: #ffffff !important;
+        transform: translateY(-1px);
+    }
+
+    @media (max-width: 900px) {
+        .fix-cta { flex-direction: column; align-items: flex-start; }
+        .fix-cta-button { width: 100%; }
+    }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -3222,7 +3702,12 @@ if st.session_state["view"] == "home":
     st.markdown('<div class="scan-row-label">Enter your website to see how clearly AI can understand your business.</div>', unsafe_allow_html=True)
     col_input, col_button = st.columns([3.4, 1.25], gap="small")
     with col_input:
-        url = st.text_input("Website address", placeholder="https://yourbusiness.com", key="website_url_input")
+        url = st.text_input(
+            "Website address",
+            placeholder="https://yourbusiness.com",
+            key="website_url_input",
+            on_change=queue_scan_from_input,
+        )
     with col_button:
         if st.session_state["scanning"]:
             st.button("Analyzing …", disabled=True, use_container_width=True, key="scan_button_busy")
