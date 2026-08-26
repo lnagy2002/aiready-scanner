@@ -154,6 +154,13 @@ def stripe_payment_link(report=None) -> str:
     return link
 
 
+def manual_fulfillment() -> bool:
+    """Feature flag: when on, the paid-report flow captures the lead and stops
+    there (no Stripe checkout) — you fulfill and invoice the report manually.
+    Toggle via the MANUAL_FULFILLMENT secret (true/1/yes/on)."""
+    return _secret("MANUAL_FULFILLMENT", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def homepage_of(report):
     return report.pages[0] if getattr(report, "pages", None) else None
 
@@ -855,71 +862,82 @@ def render_report_purchase(report) -> None:
     # round-trip) to save the lead, and THEN a second click to reach Stripe.
     # Plain inputs rerun as each field commits (blur/Enter), so we can save the
     # lead as it's filled and make the checkout a single real link click.
-    with st.container(key="report_purchase_form"):
-        pc1, pc2 = st.columns(2, gap="medium")
-        with pc1:
-            st.markdown('<div class="field-label">Company name</div>', unsafe_allow_html=True)
-            company = st.text_input("Company name", label_visibility="collapsed", key="purchase_company")
-            st.markdown('<div class="field-label">Phone number</div>', unsafe_allow_html=True)
-            phone = st.text_input("Phone number", label_visibility="collapsed", key="purchase_phone")
-        with pc2:
-            st.markdown('<div class="field-label">Contact name</div>', unsafe_allow_html=True)
-            contact_name = st.text_input("Contact name", label_visibility="collapsed", key="purchase_contact_name")
-            st.markdown('<div class="field-label">Email address</div>', unsafe_allow_html=True)
-            email = st.text_input("Email address", label_visibility="collapsed", key="purchase_email")
+    manual = manual_fulfillment()
+    done_key = f"purchase_done::{report.normalized_url}"
 
-        values = {"company": company, "contact_name": contact_name, "phone": phone, "email": email}
-        all_filled = all(v.strip() for v in values.values())
-        link = stripe_payment_link(report)
-
-        if not all_filled:
-            # Placeholder until every field is filled — so the one real click on
-            # the live button below always has the lead already captured.
+    # Once submitted, show ONLY the confirmation — the form (and its single
+    # submit button) is gone, so nothing lingers beside the thank-you.
+    done = st.session_state.get(done_key)
+    if done:
+        link = "" if manual else stripe_payment_link(report)
+        if link:
             st.markdown(
-                '<div class="checkout-button checkout-button-disabled">'
-                'Fill in your details to continue — $10</div>',
+                '<div class="form-message form-message-success">'
+                f'<strong>Thanks, {escape(done["contact_name"])}.</strong> One last step — complete your $10 '
+                f'payment below. We’ll email your report to <strong>{escape(done["email"])}</strong>.</div>',
                 unsafe_allow_html=True,
             )
-            return
-
-        # All present: save the lead now (before the click), de-duped by content
-        # so unrelated reruns don't append duplicate rows. Sheet-only — the leads
-        # worksheet is the source of truth (see datastore.log_lead).
-        sig = (company, contact_name, phone, email, report.normalized_url)
-        if st.session_state.get("purchase_logged_sig") != sig:
-            st.session_state["purchase_logged_ok"] = datastore.log_lead({
-                **values,
-                "website": report.normalized_url,
-                "score": report.site_score,
-                "grade": report.grade,
-            })
-            st.session_state["purchase_logged_sig"] = sig
-
-        if link:
             st.markdown(
                 f'<a class="checkout-button" href="{escape(link)}" target="_blank" rel="noopener">'
                 'Continue to secure checkout — $10 →</a>',
                 unsafe_allow_html=True,
             )
-            st.markdown(
-                f'<div class="admin-note">We’ll email your report to {escape(email)} after checkout.</div>',
-                unsafe_allow_html=True,
-            )
         else:
-            # No payment link configured yet — still captured the request.
             st.markdown(
                 '<div class="form-message form-message-success">'
-                f'<strong>Thanks, {escape(contact_name)}.</strong> We received your request and will email your report to <strong>{escape(email)}</strong> shortly.'
-                '</div>',
+                f'<strong>Thank you, {escape(done["contact_name"])}!</strong> We’ve received your request and '
+                f'will email your full report to <strong>{escape(done["email"])}</strong> shortly.</div>',
                 unsafe_allow_html=True,
             )
-
         if is_admin():
             st.markdown(
-                '<div class="admin-note">Owner view — lead logged to sheet: '
-                f'{escape(str(st.session_state.get("purchase_logged_ok")))}</div>',
+                f'<div class="admin-note">Owner view — lead logged to sheet: {escape(str(done["logged"]))}</div>',
                 unsafe_allow_html=True,
             )
+        return
+
+    # A real submit button (form) is the reliable commit point — browser autofill
+    # doesn't reliably fire the change events a reactive "enable when filled"
+    # check needs. A form reads every field at submit, autofilled or typed.
+    with st.container(key="report_purchase_form"):
+        with st.form("report_purchase_form_inner", clear_on_submit=False):
+            pc1, pc2 = st.columns(2, gap="medium")
+            with pc1:
+                st.markdown('<div class="field-label">Company name</div>', unsafe_allow_html=True)
+                company = st.text_input("Company name", label_visibility="collapsed", key="purchase_company")
+                st.markdown('<div class="field-label">Phone number</div>', unsafe_allow_html=True)
+                phone = st.text_input("Phone number", label_visibility="collapsed", key="purchase_phone")
+            with pc2:
+                st.markdown('<div class="field-label">Contact name</div>', unsafe_allow_html=True)
+                contact_name = st.text_input("Contact name", label_visibility="collapsed", key="purchase_contact_name")
+                st.markdown('<div class="field-label">Email address</div>', unsafe_allow_html=True)
+                email = st.text_input("Email address", label_visibility="collapsed", key="purchase_email")
+            submit_label = "Get my report — $10" if manual else "Continue — $10"
+            submitted = st.form_submit_button(submit_label, use_container_width=True)
+
+        if submitted:
+            missing = [
+                label for label, v in (
+                    ("Company name", company), ("Contact name", contact_name),
+                    ("Phone number", phone), ("Email address", email),
+                ) if not v.strip()
+            ]
+            if missing:
+                st.markdown(
+                    '<div class="form-message form-message-error">'
+                    '<strong>Almost there.</strong> Please fill in: ' + escape(", ".join(missing)) + '</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                logged = datastore.log_lead({
+                    "company": company, "contact_name": contact_name, "phone": phone, "email": email,
+                    "website": report.normalized_url,
+                    "score": report.site_score,
+                    "grade": report.grade,
+                })
+                st.session_state[done_key] = {"contact_name": contact_name, "email": email, "logged": logged}
+                # Swap the form out for the confirmation on the next run.
+                st.rerun()
 
 
 def render_full_report_preview(report) -> None:
@@ -1617,6 +1635,7 @@ def render_admin_diagnostics() -> None:
         st.markdown(
             f"- **Data store (Google Sheets):** {'✅ configured' if store_ok else '❌ not configured'}\n"
             f"- **Payment link (Stripe):** {'✅ set' if _secret('STRIPE_PAYMENT_LINK') else '❌ not set'}\n"
+            f"- **Fulfillment mode:** {'📩 Manual — no Stripe (MANUAL_FULFILLMENT on)' if manual_fulfillment() else '💳 Stripe checkout (flag off)'}\n"
             f"- **Current typical score:** {current_typical_score()}/100"
         )
 
