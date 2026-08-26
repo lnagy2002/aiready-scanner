@@ -839,30 +839,47 @@ def build_pdf_for_report(report) -> bytes:
 def render_report_purchase(report) -> None:
     """Visitor-facing purchase step: collect buyer details, log the lead,
     and send them to Stripe checkout when a payment link is configured."""
-    purchase_intro = (
-        '<div class="purchase-panel">'
-        '<div class="purchase-panel-head">'
-        '<div>'
-        '<div class="purchase-eyebrow">Personalized PDF report</div>'
-        '<h2>Get your full report — $10</h2>'
-        '<p>Enter your details below. After checkout, we’ll email the personalized PDF report to the address you provide.</p>'
-        '</div>'
-        '<div class="purchase-price-badge">$10</div>'
-        '</div>'
-        '<div class="purchase-trust-row">'
-        '<span>Secure checkout</span>'
-        '<span>Manual PDF delivery</span>'
-        '<span>Uses this scan’s results</span>'
-        '</div>'
-        '</div>'
-    )
+    manual = manual_fulfillment()
+    if manual:
+        # Launch offer while fulfilling by hand — first 10 free, no payment.
+        purchase_intro = (
+            '<div class="purchase-panel">'
+            '<div class="purchase-panel-head">'
+            '<div>'
+            '<div class="purchase-eyebrow">Personalized PDF report</div>'
+            '<h2>Get your full report</h2>'
+            '<p><strong>Launch offer — the first 10 reports are free.</strong> Enter your details and we’ll '
+            'email your personalized PDF report. No payment needed.</p>'
+            '</div>'
+            '<div class="purchase-price-badge purchase-price-badge-free">First 10 free</div>'
+            '</div>'
+            '<div class="purchase-trust-row">'
+            '<span>No payment needed</span>'
+            '<span>Emailed as a PDF</span>'
+            '<span>Uses this scan’s results</span>'
+            '</div>'
+            '</div>'
+        )
+    else:
+        purchase_intro = (
+            '<div class="purchase-panel">'
+            '<div class="purchase-panel-head">'
+            '<div>'
+            '<div class="purchase-eyebrow">Personalized PDF report</div>'
+            '<h2>Get your full report — $10</h2>'
+            '<p>Enter your details below. After checkout, we’ll email the personalized PDF report to the address you provide.</p>'
+            '</div>'
+            '<div class="purchase-price-badge">$10</div>'
+            '</div>'
+            '<div class="purchase-trust-row">'
+            '<span>Secure checkout</span>'
+            '<span>Manual PDF delivery</span>'
+            '<span>Uses this scan’s results</span>'
+            '</div>'
+            '</div>'
+        )
     st.markdown(purchase_intro, unsafe_allow_html=True)
 
-    # No st.form here on purpose: a form would need a submit click (server
-    # round-trip) to save the lead, and THEN a second click to reach Stripe.
-    # Plain inputs rerun as each field commits (blur/Enter), so we can save the
-    # lead as it's filled and make the checkout a single real link click.
-    manual = manual_fulfillment()
     done_key = f"purchase_done::{report.normalized_url}"
 
     # Once submitted, show ONLY the confirmation — the form (and its single
@@ -884,9 +901,13 @@ def render_report_purchase(report) -> None:
             )
         else:
             st.markdown(
-                '<div class="form-message form-message-success">'
-                f'<strong>Thank you, {escape(done["contact_name"])}!</strong> We’ve received your request and '
-                f'will email your full report to <strong>{escape(done["email"])}</strong> shortly.</div>',
+                '<div class="confirm-hero">'
+                '<div class="confirm-badge">✓</div>'
+                '<div class="confirm-eyebrow">Report request received</div>'
+                '<h2 class="confirm-title">Your full report is on the way</h2>'
+                f'<div class="confirm-sub">Thank you, {escape(done["contact_name"])}! We’ve received your request '
+                f'and will email your full report to <strong>{escape(done["email"])}</strong> shortly.</div>'
+                '</div>',
                 unsafe_allow_html=True,
             )
         if is_admin():
@@ -912,7 +933,7 @@ def render_report_purchase(report) -> None:
                 contact_name = st.text_input("Contact name", label_visibility="collapsed", key="purchase_contact_name")
                 st.markdown('<div class="field-label">Email address</div>', unsafe_allow_html=True)
                 email = st.text_input("Email address", label_visibility="collapsed", key="purchase_email")
-            submit_label = "Get my report — $10" if manual else "Continue — $10"
+            submit_label = "Request my full report" if manual else "Continue — $10"
             submitted = st.form_submit_button(submit_label, use_container_width=True)
 
         if submitted:
@@ -934,6 +955,9 @@ def render_report_purchase(report) -> None:
                     "website": report.normalized_url,
                     "score": report.site_score,
                     "grade": report.grade,
+                    # How it was offered: manual mode = free (launch promo),
+                    # Stripe mode = paid checkout. Lets you track free vs paid.
+                    "offer": "free" if manual else "paid",
                 })
                 st.session_state[done_key] = {"contact_name": contact_name, "email": email, "logged": logged}
                 # Swap the form out for the confirmation on the next run.
@@ -3472,6 +3496,11 @@ st.markdown("""
         font-size: 0.95rem;
     }
 
+    /* "First 10 free" launch badge — green to read as a giveaway, not a price. */
+    .purchase-price-badge-free {
+        background: var(--tier-good-text);
+    }
+
     .purchase-trust-row {
         display: flex;
         flex-wrap: wrap;
@@ -3593,6 +3622,57 @@ st.markdown("""
         color: var(--muted);
         font-size: 0.9rem;
     }
+
+    /* ---- Post-submit confirmation (manual fulfillment) ---- */
+    .confirm-hero {
+        text-align: center;
+        background:
+            radial-gradient(circle at 50% 0%, rgba(231,111,81,0.16), transparent 42%),
+            #FFF1EA;
+        border: 1px solid #F0D7CB;
+        border-radius: 0.9rem;
+        padding: 2.6rem 1.6rem 2.9rem;
+        margin: 0.4rem 0 1rem 0;
+    }
+    .confirm-badge {
+        width: 62px;
+        height: 62px;
+        border-radius: 999px;
+        background: #FFE1D6;
+        border: 1px solid #F0BBA9;
+        color: var(--accent);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.9rem;
+        font-weight: 900;
+        margin-bottom: 1.1rem;
+    }
+    .confirm-eyebrow {
+        color: var(--accent);
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        font-weight: 900;
+        font-size: 0.9rem;
+        margin-bottom: 0.7rem;
+    }
+    .confirm-title {
+        color: var(--ink);
+        font-size: clamp(2.3rem, 5vw, 3.9rem);
+        line-height: 1.0;
+        letter-spacing: -0.06em;
+        font-weight: 920;
+        margin: 0 0 1rem 0;
+    }
+    .confirm-sub {
+        max-width: 620px;
+        margin: 0 auto;
+        text-align: center;
+        color: #4F4B46;
+        font-size: 1.12rem;
+        line-height: 1.55;
+    }
+    .confirm-sub strong { color: var(--accent); font-weight: 800; }
 
     /* Smooth in-page scroll for the "Want the exact fixes?" anchor jump. */
     html { scroll-behavior: smooth; }

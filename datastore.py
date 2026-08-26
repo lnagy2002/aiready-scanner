@@ -221,7 +221,7 @@ def log_lead(lead: dict) -> bool:
     """Append one report-purchase request. Best-effort; returns success."""
     if not is_available():
         return False
-    headers = ["timestamp", "company", "contact_name", "phone", "email", "website", "score", "grade"]
+    headers = ["timestamp", "company", "contact_name", "phone", "email", "website", "score", "grade", "offer"]
     ws = _worksheet(LEADS_WORKSHEET, headers)
     if ws is None:
         return False
@@ -236,6 +236,7 @@ def log_lead(lead: dict) -> bool:
                 lead.get("website", ""),
                 lead.get("score", ""),
                 lead.get("grade", ""),
+                lead.get("offer", ""),  # "free" (launch promo) or "paid" (Stripe)
             ],
             value_input_option="RAW",
         )
